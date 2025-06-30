@@ -26,6 +26,27 @@ const TWITTER_BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 const SELF_PING_URL = process.env.SELF_PING_URL;
 
+// Coin price history storage
+const lastPrices = {};
+const COINGECKO_SYMBOLS = [
+  'bitcoin', 'ethereum', 'solana', 'pepe', 'sui', 'mog-coin', 'moodeng', 'brett', 'housecoin',
+  'kaspa', 'space', 'bellscoin', 'clore', 'xec', 'octa', 'rvn', 'nexa', 'dnx', 'xna', 'dingo',
+  'soh', 'bsv', 'sdr', 'satox', 'neox', 'ckb', 'blockx', 'etc', 'alph', 'ppc', 'cau', 'mewc',
+  'dgb', 'fren', 'zeph', 'btcz', 'dvt', 'fch', 'pac', 'zec', 'aitpg', 'kls', 'nacho', 'kaspy',
+  'kango', 'arrr', 'kasper', 'rxd', 'beam', 'fractal-bitcoin', 'pepe-coin', 'fartcoin', 'spx6900'
+];
+
+const ALERT_THRESHOLDS = {
+  bitcoin: 10, ethereum: 10, solana: 10, pepe: 50,
+  'sui': 20, 'mog-coin': 50, 'moodeng': 50, 'brett': 50, 'housecoin': 50,
+  'kaspa': 50, 'space': 50, 'bellscoin': 50, 'clore': 50, 'xec': 50, 'octa': 50, 'rvn': 50,
+  'nexa': 50, 'dnx': 50, 'xna': 50, 'dingo': 50, 'soh': 50, 'bsv': 50, 'sdr': 50, 'satox': 50,
+  'neox': 50, 'ckb': 50, 'blockx': 50, 'etc': 50, 'alph': 50, 'ppc': 50, 'cau': 50, 'mewc': 50,
+  'dgb': 50, 'fren': 50, 'zeph': 50, 'btcz': 50, 'dvt': 50, 'fch': 50, 'pac': 50, 'zec': 50,
+  'aitpg': 50, 'kls': 50, 'nacho': 50, 'kaspy': 50, 'kango': 50, 'arrr': 50, 'kasper': 50,
+  'rxd': 50, 'beam': 50, 'FB': 50, 'pep': 50, 'fartcoin': 50, 'spx6900': 50
+};
+
 // Slash commands setup
 const commands = [
   new SlashCommandBuilder()
@@ -60,8 +81,9 @@ const rest = new REST({ version: '10' }).setToken(BOT_TOKEN);
 
 client.on('ready', () => {
   console.log(`🤖 Logged in as ${client.user.tag}`);
-  checkLatestTweet();
-  setInterval(checkLatestTweet, 60 * 1000); // every 1 minute
+  checkAllTwitterAccounts();
+  setInterval(checkAllTwitterAccounts, 60 * 1000);
+  setInterval(checkCryptoPrices, 120 * 1000);
 });
 
 client.on('interactionCreate', async interaction => {
@@ -103,31 +125,69 @@ client.on('interactionCreate', async interaction => {
 });
 
 // Twitter Auto Fetch
-let lastTweetId = null;
-const WATCHER_GURU_ID = '1244160501793519616';
+let lastTweetIds = {};
+const TWITTER_USER_IDS = {
+  'WatcherGuru': '1244160501793519616',
+  'DegenerateNews': '1397256779620175872',
+  'realDonaldTrump': '25073877',
+  'arkham': '1433001060820645895'
+};
 
-async function checkLatestTweet() {
-  try {
-    const res = await fetch(`https://api.twitter.com/2/users/${WATCHER_GURU_ID}/tweets?exclude=replies&max_results=5`, {
-      headers: {
-        Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`
-      }
-    });
-    const data = await res.json();
+async function checkAllTwitterAccounts() {
+  for (const [name, id] of Object.entries(TWITTER_USER_IDS)) {
+    try {
+      const res = await fetch(`https://api.twitter.com/2/users/${id}/tweets?exclude=replies&max_results=5`, {
+        headers: {
+          Authorization: `Bearer ${TWITTER_BEARER_TOKEN}`
+        }
+      });
+      const data = await res.json();
 
-    if (data?.data?.length > 0) {
-      const tweet = data.data[0];
-      if (tweet.id !== lastTweetId) {
-        lastTweetId = tweet.id;
-        const tweetUrl = `https://twitter.com/WatcherGuru/status/${tweet.id}`;
-        const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
-        if (channel.isTextBased()) {
-          channel.send(`🧠 ${tweet.text}\n🔗 ${tweetUrl}`);
+      if (data?.data?.length > 0) {
+        const tweet = data.data[0];
+        if (tweet.id !== lastTweetIds[id]) {
+          lastTweetIds[id] = tweet.id;
+          const tweetUrl = `https://twitter.com/${name}/status/${tweet.id}`;
+          const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+          if (channel.isTextBased()) {
+            channel.send(`🧠 NEW POST from @${name}:
+${tweet.text}
+🔗 ${tweetUrl}`);
+          }
         }
       }
+    } catch (err) {
+      console.error(`❌ Failed to fetch tweet from @${name}:`, err);
+    }
+  }
+}
+
+// CoinGecko price alerts with % change logic
+async function checkCryptoPrices() {
+  try {
+    const res = await fetch(`https://api.coingecko.com/api/v3/simple/price?ids=${COINGECKO_SYMBOLS.join(',')}&vs_currencies=usd`);
+    const data = await res.json();
+    const channel = await client.channels.fetch(DISCORD_CHANNEL_ID);
+
+    if (!channel.isTextBased()) return;
+
+    for (const symbol of COINGECKO_SYMBOLS) {
+      const price = data[symbol]?.usd;
+      if (!price) continue;
+
+      const last = lastPrices[symbol];
+      if (last) {
+        const change = ((price - last) / last) * 100;
+        const threshold = ALERT_THRESHOLDS[symbol];
+        if (Math.abs(change) >= threshold) {
+          const direction = change > 0 ? 'up' : 'down';
+          channel.send(`📈 ${symbol.toUpperCase()} is ${direction} ${Math.abs(change).toFixed(2)}%: $${price.toFixed(2)}`);
+        }
+      }
+      lastPrices[symbol] = price;
     }
   } catch (err) {
-    console.error('❌ Failed to fetch tweet:', err);
+    console.error('❌ Failed to fetch crypto prices from CoinGecko:', err);
   }
 }
 
@@ -137,6 +197,6 @@ setInterval(() => {
   fetch(SELF_PING_URL)
     .then(() => console.log('🔁 Self-ping sent'))
     .catch(err => console.error('⚠️ Self-ping failed:', err));
-}, 280000); // every 4m 40s
+}, 280000);
 
 client.login(BOT_TOKEN);
